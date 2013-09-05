@@ -194,7 +194,10 @@ class quiz_simulate_report extends quiz_default_report {
         $quba = question_engine::make_questions_usage_by_activity('mod_quiz', $quizobj->get_context());
         $quba->set_preferred_behaviour($quizobj->get_quiz()->preferredbehaviour);
 
-        $attempt = quiz_create_attempt($quizobj, 1, false, time(), false, $userid);
+        $prevattempts = quiz_get_user_attempts($this->quiz->id, $userid, 'all', true);
+
+        $attemptnumber = count($prevattempts) + 1;
+        $attempt = quiz_create_attempt($quizobj, $attemptnumber, false, time(), false, $userid);
         // Select variant and / or random sub question.
         if (!isset($step['variants'])) {
             $step['variants'] = array();
