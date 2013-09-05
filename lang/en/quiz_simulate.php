@@ -22,9 +22,8 @@
  * @author    James Pratt me@jamiep.org
  * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-
+$string['deleteattemptsfirst'] = 'Delete all previous attempt data for this quiz first';
 $string['noquestionwasfoundwithname'] = 'No question selectable by this random question was found with name {$a->name}.';
-
 $string['simulate'] = 'Simulate Attempts';
 $string['thisisnotarandomquestion'] = 'The question in slot no {$a->slotno} is not a random question.';
 

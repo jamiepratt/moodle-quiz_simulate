@@ -43,6 +43,7 @@ class mod_quiz_simulate_report_form extends moodleform {
             $mform->setDefault('delimiter_name', 'comma');
         }
 
+        $mform->addElement('advcheckbox', 'deleteattemptsfirst', '', get_string('deleteattemptsfirst', 'quiz_simulate'));
 
         $this->add_action_buttons(false, get_string('upload'));
     }

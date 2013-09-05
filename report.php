@@ -51,8 +51,7 @@ class quiz_simulate_report extends quiz_default_report {
     protected $course;
 
     public function display($quiz, $cm, $course) {
-        global $USER;
-
+        global $DB;
         $this->context = context_module::instance($cm->id);
         $this->quiz = $quiz;
         $this->course = $course;
@@ -74,11 +73,24 @@ class quiz_simulate_report extends quiz_default_report {
 
             $cir->init();
 
-            $olduserid = $USER->id;
-            while ($data = $cir->next()) {
-                $this->create_attempts(array_combine($cir->get_columns(), $data));
+            if ($formdata->deleteattemptsfirst == 1) {
+                quiz_delete_all_attempts($this->quiz);
             }
-            $this->set_user($olduserid);
+
+            $attemptids = array();
+
+            while ($data = $cir->next()) {
+                $stepdata = array_combine($cir->get_columns(), $data);
+                $stepdata = $this->explode_dot_separated_keys_to_make_subindexs($stepdata);
+                if (isset($attemptids[$stepdata['quizattempt']])) {
+                    $attemptid = $attemptids[$stepdata['quizattempt']];
+                } else {
+                    $userid = $this->find_or_create_user($stepdata);
+                    $attemptid = $this->start_attempt($stepdata, $userid);
+                    $attemptids[$stepdata['quizattempt']] = $attemptid;
+                }
+                $this->attempt_step($stepdata, $attemptid);
+            }
             redirect($reporturl->out(false, array('mode' => 'overview')));
         } else {
             $this->print_header_and_tabs($cm, $course, $quiz, $this->mode);
@@ -106,11 +118,10 @@ class quiz_simulate_report extends quiz_default_report {
 
     /**
      * @param $step array of data from csv file keyed with column names.
+     * @return integer user id
      */
-    protected function create_attempts($step) {
+    protected function find_or_create_user($step) {
         global $DB;
-
-        $step = $this->explode_dot_separated_keys_to_make_subindexs($step);
         // Find existing user or make a new user to do the quiz.
         $username = array('username' => $step['firstname'].'.'.$step['lastname'],
                           'firstname' => $step['firstname'],
@@ -123,89 +134,26 @@ class quiz_simulate_report extends quiz_default_report {
             // Enrol or update enrollment.
             $this->get_data_generator()->enrol_user($user->id, $this->quiz->course);
         }
-        $this->set_user($user);
-
-
-        // Start the attempt.
-        $quizobj = quiz::create($this->quiz->id, $user->id);
-        $quba = question_engine::make_questions_usage_by_activity('mod_quiz', $quizobj->get_context());
-        $quba->set_preferred_behaviour($quizobj->get_quiz()->preferredbehaviour);
-
-        $timenow = time();
-        $attempt = quiz_create_attempt($quizobj, 1, false, $timenow);
-        // Select variant and / or random sub question.
-        if (!isset($step['variants'])) {
-            $step['variants'] = array();
-        }
-
-        if (isset($step['randqs'])) {
-            $quizobj->preload_questions();
-            $qids = explode(',', quiz_questions_in_quiz($this->quiz->questions));
-
-            foreach ($step['randqs'] as $slotno => $randqname) {
-                $randq = question_finder::get_instance()->load_question_data($qids[$slotno - 1]);
-                if ($randq->qtype !== 'random') {
-                    $a = new stdClass();
-                    $a->slotno = $slotno;
-                    throw new moodle_exception('thisisnotarandomquestion', 'quiz_simulate', '', $a);
-                } else {
-                    $qids = question_bank::get_qtype('random')->get_available_questions_from_category($randq->category,
-                                                                                    !empty($randq->questiontext));
-                    $found = false;
-                    foreach ($qids as $qid) {
-                        $q = question_finder::get_instance()->load_question_data($qid);
-                        if ($q->name === $randqname) {
-                            $step['randqs'][$slotno] = $q->id;
-                            $found = true;
-                            break;
-                        }
-                    }
-                    if (false === $found) {
-                        $a = new stdClass();
-                        $a->name = $randqname;
-                        throw new moodle_exception('noquestionwasfoundwithname', 'quiz_simulate', '', $a);
-                    }
-                }
-            }
-        } else {
-            $step['randqs'] = array();
-        }
-        quiz_start_new_attempt($quizobj, $quba, $attempt, 1, $timenow, $step['randqs'], $step['variants']);
-        quiz_attempt_save_started($quizobj, $quba, $attempt);
-
-
-        // Process some responses from the student.
-        $attemptobj = quiz_attempt::create($attempt->id);
-        $attemptobj->process_submitted_actions($timenow, false, $step['responses']);
-
-        // Finish the attempt.
-        $attemptobj = quiz_attempt::create($attempt->id);
-        $attemptobj->process_finish($timenow, false);
+        return $user->id;
     }
 
-
     /**
-     * Set current $USER, reset access cache.
-     * @static
-     * @param null|int|stdClass $user user record, null or 0 means non-logged-in, positive integer means userid
-     * @return void
+     * @param $step array of data from csv file keyed with column names.
+     * @param $attemptid integer attempt id if this is not a new attempt or 0.
+     * @throws moodle_exception
      */
-    protected function set_user($user = null) {
-        global $CFG, $DB;
-        if (is_object($user)) {
-            $user = clone($user);
-        } else if (!$user) {
-            $user = new stdClass();
-            $user->id = 0;
-            $user->mnethostid = $CFG->mnet_localhost_id;
-        } else {
-            $user = $DB->get_record('user', array('id'=>$user));
-        }
-        unset($user->description);
-        unset($user->access);
-        unset($user->preference);
+    protected function attempt_step($step, $attemptid) {
+        // Process some responses from the student.
+        $attemptobj = quiz_attempt::create($attemptid);
+        $attemptobj->process_submitted_actions(time(), false, $step['responses']);
 
-        session_set_user($user);
+        // If there is no column in the csv file 'finish', then default to finish each attempt.
+        // Or else only finish when the finish column is not empty.
+        if (!isset($step['finished']) || !empty($step['finished'])) {
+            // Finish the attempt.
+            $attemptobj = quiz_attempt::create($attemptid);
+            $attemptobj->process_finish(time(), false);
+        }
     }
 
     /**
@@ -234,5 +182,72 @@ class quiz_simulate_report extends quiz_default_report {
         return $parts;
     }
 
+    /**
+     * @param $step array of data from csv file keyed with column names.
+     * @param $userid integer id of the user doing the attempt.
+     * @return integer id of the attempt created.
+     * @throws moodle_exception
+     */
+    protected function start_attempt($step, $userid) {
+        // Start the attempt.
+        $quizobj = quiz::create($this->quiz->id, $userid);
+        $quba = question_engine::make_questions_usage_by_activity('mod_quiz', $quizobj->get_context());
+        $quba->set_preferred_behaviour($quizobj->get_quiz()->preferredbehaviour);
+
+        $attempt = quiz_create_attempt($quizobj, 1, false, time(), false, $userid);
+        // Select variant and / or random sub question.
+        if (!isset($step['variants'])) {
+            $step['variants'] = array();
+        }
+
+        $randqids = $this->find_randq_ids_from_names($quizobj, $step);
+
+        quiz_start_new_attempt($quizobj, $quba, $attempt, 1, time(), $randqids, $step['variants']);
+        quiz_attempt_save_started($quizobj, $quba, $attempt);
+        return $attempt->id;
+    }
+
+    /**
+     * @param $quizobj quiz
+     * @param $step array data from csv file
+     * @return array slotno => id of question to force selection of.
+     * @throws moodle_exception
+     */
+    protected function find_randq_ids_from_names($quizobj, $step) {
+        if (isset($step['randqs'])) {
+            $randqids = array();
+            $quizobj->preload_questions();
+            $qids = explode(',', quiz_questions_in_quiz($this->quiz->questions));
+
+            foreach ($step['randqs'] as $slotno => $randqname) {
+                $randq = question_finder::get_instance()->load_question_data($qids[$slotno - 1]);
+                if ($randq->qtype !== 'random') {
+                    $a = new stdClass();
+                    $a->slotno = $slotno;
+                    throw new moodle_exception('thisisnotarandomquestion', 'quiz_simulate', '', $a);
+                } else {
+                    $qids = question_bank::get_qtype('random')->get_available_questions_from_category($randq->category,
+                                                                                                      !empty($randq->questiontext));
+                    $found = false;
+                    foreach ($qids as $qid) {
+                        $q = question_finder::get_instance()->load_question_data($qid);
+                        if ($q->name === $randqname) {
+                            $randqids[$slotno] = $q->id;
+                            $found = true;
+                            break;
+                        }
+                    }
+                    if (false === $found) {
+                        $a = new stdClass();
+                        $a->name = $randqname;
+                        throw new moodle_exception('noquestionwasfoundwithname', 'quiz_simulate', '', $a);
+                    }
+                }
+            }
+            return $randqids;
+        } else {
+            return array();
+        }
+    }
 
 }
