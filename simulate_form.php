@@ -15,9 +15,9 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * ${filedescription}
+ * Form used to upload csv file of step data.
  *
- * @package    ${package}_{subpackage}
+ * @package    quiz_simulate
  * @copyright  2013 The Open University
  * @author     James Pratt me@jamiep.org
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
