@@ -51,7 +51,7 @@ class quiz_simulate_report extends quiz_default_report {
     protected $course;
 
     public function display($quiz, $cm, $course) {
-        global $DB;
+        global $OUTPUT;
         $this->context = context_module::instance($cm->id);
         $this->quiz = $quiz;
         $this->course = $course;
@@ -79,19 +79,58 @@ class quiz_simulate_report extends quiz_default_report {
 
             $attemptids = array();
 
-            while ($data = $cir->next()) {
-                $stepdata = array_combine($cir->get_columns(), $data);
-                $stepdata = $this->explode_dot_separated_keys_to_make_subindexs($stepdata);
-                if (isset($attemptids[$stepdata['quizattempt']])) {
-                    $attemptid = $attemptids[$stepdata['quizattempt']];
-                } else {
-                    $userid = $this->find_or_create_user($stepdata);
-                    $attemptid = $this->start_attempt($stepdata, $userid);
-                    $attemptids[$stepdata['quizattempt']] = $attemptid;
+            if ($formdata->shuffletocreatelargedataset != 1) {
+                while ($data = $cir->next()) {
+                    $stepdata = array_combine($cir->get_columns(), $data);
+                    $stepdata = $this->explode_dot_separated_keys_to_make_subindexs($stepdata);
+                    if (isset($attemptids[$stepdata['quizattempt']])) {
+                        $attemptid = $attemptids[$stepdata['quizattempt']];
+                    } else {
+                        $userid = $this->find_or_create_user($stepdata);
+                        $attemptid = $this->start_attempt($stepdata, $userid);
+                        $attemptids[$stepdata['quizattempt']] = $attemptid;
+                    }
+                    $this->attempt_step($stepdata, $attemptid);
                 }
-                $this->attempt_step($stepdata, $attemptid);
+                redirect($reporturl->out(false, array('mode' => 'overview')));
+            } else {
+                $this->print_header_and_tabs($cm, $course, $quiz, $this->mode);
+                $possibleresponses = array();
+                $stepdatum = array();
+                while ($data = $cir->next()) {
+                    $stepdata = array_combine($cir->get_columns(), $data);
+                    $stepdata = $this->explode_dot_separated_keys_to_make_subindexs($stepdata);
+                    $stepdatum[] = $stepdata;
+                    foreach ($stepdata['responses'] as $slot => $response) {
+                        if (!isset($possibleresponses[$slot])) {
+                            $possibleresponses[$slot] = array();
+                        }
+                        $possibleresponses[$slot][] = $response;
+                    }
+                }
+                $progress = new \core\progress\display_if_slow();
+                $progress->start_progress('Generating attempt data', 400);
+                for ($attemptno = 1; $attemptno <= 400; $attemptno++) {
+                    foreach ($stepdatum as $stepdata) {
+                        $progress->progress($attemptno);
+                        foreach ($possibleresponses as $slot => $possibleresponse) {
+                            if (isset($stepdata['variants']) && isset($stepdata['variants'][$slot])) {
+                                continue;
+                            }
+                            if (isset($stepdata['randqs']) && isset($stepdata['randqs'][$slot])) {
+                                continue;
+                            }
+                            shuffle($possibleresponse);
+                            $stepdata['responses'][$slot] = end($possibleresponse);
+                        }
+                        $userid = $this->find_or_create_user($stepdata);
+                        $attemptid = $this->start_attempt($stepdata, $userid);
+                        $this->attempt_step($stepdata, $attemptid);
+                    }
+                }
+                $progress->end_progress();
+                echo $OUTPUT->continue_button($reporturl->out(false, array('mode' => 'overview')));
             }
-            redirect($reporturl->out(false, array('mode' => 'overview')));
         } else {
             $this->print_header_and_tabs($cm, $course, $quiz, $this->mode);
             $mform->display();
