@@ -86,7 +86,7 @@ class quiz_simulate_report extends quiz_default_report {
                     if (isset($attemptids[$stepdata['quizattempt']])) {
                         $attemptid = $attemptids[$stepdata['quizattempt']];
                     } else {
-                        $userid = $this->find_or_create_user($stepdata);
+                        $userid = $this->find_or_create_user($stepdata['firstname'], $stepdata['lastname']);
                         $attemptid = $this->start_attempt($stepdata, $userid);
                         $attemptids[$stepdata['quizattempt']] = $attemptid;
                     }
@@ -96,34 +96,44 @@ class quiz_simulate_report extends quiz_default_report {
             } else {
                 $this->print_header_and_tabs($cm, $course, $quiz, $this->mode);
                 $possibleresponses = array();
+                $possiblefirstnames = array();
+                $possiblelastnames = array();
                 $stepdatum = array();
                 while ($data = $cir->next()) {
                     $stepdata = array_combine($cir->get_columns(), $data);
                     $stepdata = $this->explode_dot_separated_keys_to_make_subindexs($stepdata);
                     $stepdatum[] = $stepdata;
+                    $possiblefirstnames[] = $stepdata['firstname'];
+                    $possiblelastnames[] = $stepdata['lastname'];
                     foreach ($stepdata['responses'] as $slot => $response) {
+                        list($variant, $rand) = $this->extract_variant_no_and_rand_name($stepdata, $slot);
                         if (!isset($possibleresponses[$slot])) {
                             $possibleresponses[$slot] = array();
                         }
-                        $possibleresponses[$slot][] = $response;
+                        if (!isset($possibleresponses[$slot][$rand])) {
+                            $possibleresponses[$slot][$rand] = array();
+                        }
+                        if (!isset($possibleresponses[$slot][$rand][$variant])) {
+                            $possibleresponses[$slot][$rand][$variant] = array();
+                        }
+                        $possibleresponses[$slot][$rand][$variant][] = $response;
                     }
                 }
                 $progress = new \core\progress\display_if_slow();
-                $progress->start_progress('Generating attempt data', 400);
-                for ($attemptno = 1; $attemptno <= 400; $attemptno++) {
+                $progress->start_progress('Generating attempt data', 40);
+                for ($loopno = 1; $loopno <= 40; $loopno++) {
                     foreach ($stepdatum as $stepdata) {
-                        $progress->progress($attemptno);
+                        $progress->progress($loopno);
                         foreach ($possibleresponses as $slot => $possibleresponse) {
-                            if (isset($stepdata['variants']) && isset($stepdata['variants'][$slot])) {
-                                continue;
-                            }
-                            if (isset($stepdata['randqs']) && isset($stepdata['randqs'][$slot])) {
-                                continue;
-                            }
-                            shuffle($possibleresponse);
-                            $stepdata['responses'][$slot] = end($possibleresponse);
+                            list($variant, $randname) = $this->extract_variant_no_and_rand_name($stepdata, $slot);
+                            shuffle($possibleresponse[$randname][$variant]);
+                            $stepdata['responses'][$slot] = end($possibleresponse[$randname][$variant]);
                         }
-                        $userid = $this->find_or_create_user($stepdata);
+                        shuffle($possiblefirstnames);
+                        $firstname = end($possiblefirstnames);
+                        shuffle($possiblelastnames);
+                        $lastname = end($possiblelastnames);
+                        $userid = $this->find_or_create_user($firstname, $lastname, true);
                         $attemptid = $this->start_attempt($stepdata, $userid);
                         $this->attempt_step($stepdata, $attemptid);
                     }
@@ -156,18 +166,29 @@ class quiz_simulate_report extends quiz_default_report {
     }
 
     /**
-     * @param $step array of data from csv file keyed with column names.
-     * @return integer user id
+     * @param      $firstname
+     * @param      $lastname
+     * @param bool $alwayscreatenew
+     * @return int user id
      */
-    protected function find_or_create_user($step) {
+    protected function find_or_create_user($firstname, $lastname, $alwayscreatenew = false) {
         global $DB;
         // Find existing user or make a new user to do the quiz.
-        $username = array('username' => $step['firstname'].'.'.$step['lastname'],
-                          'firstname' => $step['firstname'],
-                          'lastname'  => $step['lastname']);
+        $username = array('username' => $firstname.'.'.$lastname,
+                          'firstname' => $firstname,
+                          'lastname'  => $lastname);
 
         if (!$user = $DB->get_record('user', $username)) {
             $user = $this->get_data_generator()->create_user($username);
+        } else if ($alwayscreatenew) {
+            do {
+                $toappend = ''.random_string(4);
+                $newusername = array('username' => $firstname.'.'.$lastname.' '.$toappend,
+                                     'firstname' => $firstname,
+                                     'lastname'  => $lastname.' '.$toappend);
+
+            } while ($user = $DB->get_record('user', $newusername));
+            $user = $this->get_data_generator()->create_user($newusername);
         }
         if ($this->quiz->course != SITEID) { // No need to enrol user if quiz is on front page.
             // Enrol or update enrollment.
@@ -244,7 +265,7 @@ class quiz_simulate_report extends quiz_default_report {
 
         $randqids = $this->find_randq_ids_from_names($quizobj, $step);
 
-        quiz_start_new_attempt($quizobj, $quba, $attempt, 1, time(), $randqids, $step['variants']);
+        quiz_start_new_attempt($quizobj, $quba, $attempt, $attemptnumber, time(), $randqids, $step['variants']);
         quiz_attempt_save_started($quizobj, $quba, $attempt);
         return $attempt->id;
     }
@@ -268,11 +289,11 @@ class quiz_simulate_report extends quiz_default_report {
                     $a->slotno = $slotno;
                     throw new moodle_exception('thisisnotarandomquestion', 'quiz_simulate', '', $a);
                 } else {
-                    $qids = question_bank::get_qtype('random')->get_available_questions_from_category($randq->category,
+                    $subqids = question_bank::get_qtype('random')->get_available_questions_from_category($randq->category,
                                                                                                       !empty($randq->questiontext));
                     $found = false;
-                    foreach ($qids as $qid) {
-                        $q = question_finder::get_instance()->load_question_data($qid);
+                    foreach ($subqids as $subqid) {
+                        $q = question_finder::get_instance()->load_question_data($subqid);
                         if ($q->name === $randqname) {
                             $randqids[$slotno] = $q->id;
                             $found = true;
@@ -290,6 +311,25 @@ class quiz_simulate_report extends quiz_default_report {
         } else {
             return array();
         }
+    }
+
+    /**
+     * @param $stepdata
+     * @param $slot
+     * @return array
+     */
+    protected function extract_variant_no_and_rand_name($stepdata, $slot) {
+        if (isset($stepdata['variants']) && isset($stepdata['variants'][$slot])) {
+            $variant = $stepdata['variants'][$slot];
+        } else {
+            $variant = 1;
+        }
+        if (isset($stepdata['randqs']) && isset($stepdata['randqs'][$slot])) {
+            $rand = $stepdata['randqs'][$slot];
+        } else {
+            $rand = 0;
+        }
+        return array($variant, $rand);
     }
 
 }
