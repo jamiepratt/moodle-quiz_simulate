@@ -27,4 +27,6 @@ $string['noquestionwasfoundwithname'] = 'No question selectable by this random q
 $string['simulate'] = 'Simulate Attempts';
 $string['thisisnotarandomquestion'] = 'The question in slot no {$a->slotno} is not a random question.';
 $string['shuffletocreatelargedataset'] = 'Shuffle responses to create large dataset';
-
+$string['uploaddata'] = 'Upload csv file describing student attempts';
+$string['downloaddata'] = 'Download csv file describing student attempts at this quiz';
+$string['download'] = 'Download';

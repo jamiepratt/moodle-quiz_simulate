@@ -50,8 +50,18 @@ class quiz_simulate_report extends quiz_default_report {
     /** @var object the course record. */
     protected $course;
 
+    /**
+     * @var string[]
+     */
+    protected $subqs = null;
+
+    /**
+     * @var int[]
+     */
+    protected $qids = null;
+
     public function display($quiz, $cm, $course) {
-        global $OUTPUT;
+        global $OUTPUT, $DB;
         $this->context = context_module::instance($cm->id);
         $this->quiz = $quiz;
         $this->course = $course;
@@ -141,9 +151,18 @@ class quiz_simulate_report extends quiz_default_report {
                 $progress->end_progress();
                 echo $OUTPUT->continue_button($reporturl->out(false, array('mode' => 'overview')));
             }
+        } else if (optional_param('download', 0, PARAM_BOOL)) {
+            $this->send_download();
+
         } else {
             $this->print_header_and_tabs($cm, $course, $quiz, $this->mode);
+            echo $OUTPUT->heading(get_string('uploaddata', 'quiz_simulate'), 3);
             $mform->display();
+            echo $OUTPUT->heading(get_string('downloaddata', 'quiz_simulate'), 3);
+            echo $OUTPUT->single_button(new moodle_url($reporturl, array('download' => 1)),
+                                        get_string('download', 'quiz_simulate'),
+                                        'post',
+                                        array('class' => 'mdl-align'));
         }
     }
 
@@ -263,53 +282,84 @@ class quiz_simulate_report extends quiz_default_report {
             $step['variants'] = array();
         }
 
-        $randqids = $this->find_randq_ids_from_names($quizobj, $step);
+        $randqids = $this->find_randq_ids_from_step_data($step);
 
         quiz_start_new_attempt($quizobj, $quba, $attempt, $attemptnumber, time(), $randqids, $step['variants']);
         quiz_attempt_save_started($quizobj, $quba, $attempt);
         return $attempt->id;
     }
 
-    /**
-     * @param $quizobj quiz
-     * @param $step array data from csv file
-     * @return array slotno => id of question to force selection of.
-     * @throws moodle_exception
-     */
-    protected function find_randq_ids_from_names($quizobj, $step) {
+    protected function find_randq_ids_from_step_data($step) {
         if (isset($step['randqs'])) {
             $randqids = array();
-            $quizobj->preload_questions();
-            $qids = explode(',', quiz_questions_in_quiz($this->quiz->questions));
-
+            $this->get_subq_names();
             foreach ($step['randqs'] as $slotno => $randqname) {
-                $randq = question_finder::get_instance()->load_question_data($qids[$slotno - 1]);
-                if ($randq->qtype !== 'random') {
+                $subqnames = $this->get_subq_names_for_slot($slotno);
+                if (!$randqid = array_search($randqname, $subqnames)) {
                     $a = new stdClass();
-                    $a->slotno = $slotno;
-                    throw new moodle_exception('thisisnotarandomquestion', 'quiz_simulate', '', $a);
-                } else {
-                    $subqids = question_bank::get_qtype('random')->get_available_questions_from_category($randq->category,
-                                                                                                      !empty($randq->questiontext));
-                    $found = false;
-                    foreach ($subqids as $subqid) {
-                        $q = question_finder::get_instance()->load_question_data($subqid);
-                        if ($q->name === $randqname) {
-                            $randqids[$slotno] = $q->id;
-                            $found = true;
-                            break;
-                        }
-                    }
-                    if (false === $found) {
-                        $a = new stdClass();
-                        $a->name = $randqname;
-                        throw new moodle_exception('noquestionwasfoundwithname', 'quiz_simulate', '', $a);
-                    }
+                    $a->name = $randqname;
+                    throw new moodle_exception('noquestionwasfoundwithname', 'quiz_simulate', '', $a);
                 }
+                $randqids[$slotno] = $randqid;
             }
             return $randqids;
+
         } else {
             return array();
+        }
+    }
+
+    protected function get_subq_names() {
+        if ($this->subqs !== null) {
+            return;
+        }
+        $this->subqs = array();
+        $qids = explode(',', quiz_questions_in_quiz($this->quiz->questions));
+        question_finder::get_instance()->load_many_for_cache(array_combine($qids, $qids));
+
+        $this->qids = array_combine(range(1, count($qids)), $qids);
+        foreach ($this->qids as $slot => $qid) {
+            $q = question_finder::get_instance()->load_question_data($qid);
+            if ($q->qtype === 'random') {
+                $subqids = question_bank::get_qtype('random')
+                    ->get_available_questions_from_category($q->category, !empty($q->questiontext));
+                $this->subqs[$slot] = array();
+                foreach ($subqids as $subqid) {
+                    $subq = question_finder::get_instance()->load_question_data($subqid);
+                    $this->subqs[$slot][$subq->id] = $subq->name;
+                }
+
+            }
+        }
+    }
+
+    /**
+     * @param int $slot the slot no
+     * @throws moodle_exception
+     * @return string[] the rand question names indexed by id.
+     */
+    protected function get_subq_names_for_slot($slot) {
+        $this->get_subq_names();
+        if (!isset($this->subqs[$slot])) {
+            $a = new stdClass();
+            $a->slotno = $slot;
+            throw new moodle_exception('thisisnotarandomquestion', 'quiz_simulate', '', $a);
+        }
+        return $this->subqs[$slot];
+    }
+
+    /**
+     * @param $slot int
+     * @param $qid int
+     * @return null|string null if not a random question.
+     */
+    protected function get_subqname_for_slot_from_id($slot, $qid) {
+        $this->get_subq_names();
+        if ($qid == $this->qids[$slot]) {
+            return null;
+        } else {
+            $subqnames = $this->get_subq_names_for_slot($slot);
+            return $subqnames[$qid];
         }
     }
 
@@ -330,6 +380,120 @@ class quiz_simulate_report extends quiz_default_report {
             $rand = 0;
         }
         return array($variant, $rand);
+    }
+
+    /**
+     * Prepare csv file describing student attempts and send it as download.
+     */
+    protected function send_download() {
+        global $DB;
+        $sql = <<<EOF
+ SELECT
+    qasd.id AS id,
+    quiza.id AS quizattemptid,
+    u.lastname,
+    u.firstname,
+    qa.variant,
+    qa.slot,
+    qa.questionid,
+    qas.sequencenumber,
+    qasd.name,
+    qasd.VALUE
+
+FROM mdl_user u,
+mdl_quiz_attempts quiza
+JOIN mdl_question_usages qu ON qu.id = quiza.uniqueid
+JOIN mdl_question_attempts qa ON qa.questionusageid = qu.id
+JOIN mdl_question_attempt_steps qas ON qas.questionattemptid = qa.id
+LEFT JOIN mdl_question_attempt_step_data qasd ON qasd.attemptstepid = qas.id
+
+WHERE quiza.quiz = {$this->quiz->id} AND u.id = quiza.userid
+
+ORDER BY quiza.userid, quiza.attempt, qa.slot, qas.sequencenumber, qasd.name
+
+EOF;
+        $attempts = $DB->get_records_sql($sql);
+        $steps = array();
+        $fields = array('quizattempt', 'firstname', 'lastname', 'finished');
+        $slotsfields = array();
+        foreach ($attempts as $attempt) {
+            if ($attempt->name{0} != '_' && $attempt->name{1} != '_' && $attempt->name != '-finish') {
+                if (!isset($steps[$attempt->quizattemptid])) {
+                    $steps[$attempt->quizattemptid] = array();
+                }
+                $slot = $attempt->slot;
+                if (!isset($slotsfields[$slot])) {
+                    $slotsfields[$slot] = array();
+                }
+                if (!isset($steps[$attempt->quizattemptid][$attempt->sequencenumber])) {
+                    $steps[$attempt->quizattemptid][$attempt->sequencenumber] = array();
+                    $steps[$attempt->quizattemptid][$attempt->sequencenumber]['lastname'] = $attempt->lastname;
+                    $steps[$attempt->quizattemptid][$attempt->sequencenumber]['firstname'] = $attempt->firstname;
+
+                    if ($attempt->variant != 1) {
+                        if (!in_array('variants.'.$slot, $slotsfields[$slot])) {
+                            $slotsfields[$slot][] = 'variants.'.$slot;
+                        }
+                        $steps[$attempt->quizattemptid][$attempt->sequencenumber]['variants.'.$slot] = $attempt->variant;
+                    }
+                    $subqname = $this->get_subqname_for_slot_from_id($slot, $attempt->questionid);
+                    if ($subqname !== null) {
+                        if (!in_array('randqs.'.$slot, $slotsfields[$slot])) {
+                            $slotsfields[$slot][] = 'randqs.'.$slot;
+                        }
+                        $steps[$attempt->quizattemptid][$attempt->sequencenumber]['randqs.'.$slot] = $subqname;
+                    }
+                }
+                $csvcolumn = 'responses.'.$slot.'.'.$attempt->name;
+
+                if (!in_array($csvcolumn, $slotsfields[$slot])) {
+                    $slotsfields[$slot][] = $csvcolumn;
+                }
+                $steps[$attempt->quizattemptid][$attempt->sequencenumber][$csvcolumn] = $attempt->value;
+            }
+        }
+
+        $export = new csv_export_writer();
+
+        $export->set_filename(clean_filename($this->quiz->name.'_stepdata'));
+
+        foreach ($slotsfields as $slotfields) {
+            sort($slotfields);
+            $fields = array_merge($fields, $slotfields);
+        }
+        $export->add_data($fields);
+
+        $attemptnumber = 1;
+        foreach ($steps as $attemptsteps) {
+            $row = array();
+            do {
+                $attemptstep = array_shift($attemptsteps);
+                foreach ($fields as $field) {
+                    if (!isset($attemptstep[$field])) {
+                        if ($field === 'finished') {
+                            if (count($attemptsteps) > 0) {
+                                $row['finished'] = 0;
+                            } else {
+                                $row['finished'] = 1;
+                            }
+                        } else if ($field === 'quizattempt') {
+                            $row['quizattempt'] = $attemptnumber;
+                        } else if (substr($field, 0, 9) === 'variants.') {
+                            $row[$field] = 1;
+                        } else if (substr($field, -9) == '-tryagain' || substr($field, -7) == '-submit') {
+                            $row[$field] = 0;
+                        } else if (!isset($row[$field])) {
+                            $row[$field] = '';
+                        }
+                    } else {
+                        $row[$field] = $attemptstep[$field];
+                    }
+                }
+                $export->add_data($row);
+            } while ($attemptsteps);
+            $attemptnumber++;
+        }
+        $export->download_file();
     }
 
 }
