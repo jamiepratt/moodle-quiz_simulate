@@ -105,47 +105,79 @@ class quiz_simulate_report extends quiz_default_report {
                 redirect($reporturl->out(false, array('mode' => 'overview')));
             } else {
                 $this->print_header_and_tabs($cm, $course, $quiz, $this->mode);
-                $possibleresponses = array();
+                $responsesequences = array();
                 $possiblefirstnames = array();
                 $possiblelastnames = array();
                 $stepdatum = array();
+                $attemptsequencenumbers = array();
                 while ($data = $cir->next()) {
                     $stepdata = array_combine($cir->get_columns(), $data);
                     $stepdata = $this->explode_dot_separated_keys_to_make_subindexs($stepdata);
                     $stepdatum[] = $stepdata;
                     $possiblefirstnames[] = $stepdata['firstname'];
                     $possiblelastnames[] = $stepdata['lastname'];
-                    foreach ($stepdata['responses'] as $slot => $response) {
+                    if (!isset($attemptsequencenumbers[$stepdata['quizattempt']])) {
+                        $attemptsequencenumbers[$stepdata['quizattempt']] = 1;
+                    } else {
+                        $attemptsequencenumbers[$stepdata['quizattempt']]++;
+                    }
+                    $sequencenumber = $attemptsequencenumbers[$stepdata['quizattempt']];
+
+                    foreach ($stepdata['responses'] as $slot => $responsesequence) {
                         list($variant, $rand) = $this->extract_variant_no_and_rand_name($stepdata, $slot);
-                        if (!isset($possibleresponses[$slot])) {
-                            $possibleresponses[$slot] = array();
+                        if (!isset($responsesequences[$slot])) {
+                            $responsesequences[$slot] = array();
                         }
-                        if (!isset($possibleresponses[$slot][$rand])) {
-                            $possibleresponses[$slot][$rand] = array();
+                        if (!isset($responsesequences[$slot][$rand])) {
+                            $responsesequences[$slot][$rand] = array();
                         }
-                        if (!isset($possibleresponses[$slot][$rand][$variant])) {
-                            $possibleresponses[$slot][$rand][$variant] = array();
+                        if (!isset($responsesequences[$slot][$rand][$variant])) {
+                            $responsesequences[$slot][$rand][$variant] = array();
                         }
-                        $possibleresponses[$slot][$rand][$variant][] = $response;
+                        if (!isset($responsesequences[$slot][$rand][$variant][$stepdata['quizattempt']])) {
+                            $responsesequences[$slot][$rand][$variant][$stepdata['quizattempt']] = array();
+                        }
+                        $responsesequences[$slot][$rand][$variant][$stepdata['quizattempt']][$sequencenumber] = $responsesequence;
                     }
                 }
                 $progress = new \core\progress\display_if_slow();
                 $progress->start_progress('Generating attempt data', 40);
                 for ($loopno = 1; $loopno <= 40; $loopno++) {
                     foreach ($stepdatum as $stepdata) {
+                        $seqforthisattempt = array();
                         $progress->progress($loopno);
-                        foreach ($possibleresponses as $slot => $possibleresponse) {
-                            list($variant, $randname) = $this->extract_variant_no_and_rand_name($stepdata, $slot);
-                            shuffle($possibleresponse[$randname][$variant]);
-                            $stepdata['responses'][$slot] = end($possibleresponse[$randname][$variant]);
-                        }
                         shuffle($possiblefirstnames);
                         $firstname = end($possiblefirstnames);
                         shuffle($possiblelastnames);
                         $lastname = end($possiblelastnames);
                         $userid = $this->find_or_create_user($firstname, $lastname, true);
                         $attemptid = $this->start_attempt($stepdata, $userid);
-                        $this->attempt_step($stepdata, $attemptid);
+                        foreach ($responsesequences as $slot => $responsesequencesforslot) {
+                            list($variant, $randname) = $this->extract_variant_no_and_rand_name($stepdata, $slot);
+                            shuffle($responsesequencesforslot[$randname][$variant]);
+                            $seqforthisattempt[$slot] = end($responsesequencesforslot[$randname][$variant]);
+                        }
+
+                        do {
+                            $finished = true;
+                            foreach (array_keys($seqforthisattempt) as $slot) {
+                                if ($stepforslot = array_shift($seqforthisattempt[$slot])) {
+                                    $stepdata[$slot] = $stepforslot;
+                                    if (count($seqforthisattempt[$slot]) > 0) {
+                                        $finished = false;
+                                    }
+                                } else {
+                                    foreach ($stepdata[$slot] as $name => $value) {
+                                        if ($name{0} = '-') {
+                                            $stepdata[$slot][$name] = 0;
+                                        }
+                                    }
+                                }
+                            }
+                            $stepdata['finished'] = $finished;
+                            $this->attempt_step($stepdata, $attemptid);
+                        } while (!$finished);
+
                     }
                 }
                 $progress->end_progress();
