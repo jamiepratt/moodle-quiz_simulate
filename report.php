@@ -449,33 +449,32 @@ EOF;
         $fields = array('quizattempt', 'firstname', 'lastname', 'finished');
         $slotsfields = array();
         foreach ($attempts as $attempt) {
+            if (!isset($steps[$attempt->quizattemptid])) {
+                $steps[$attempt->quizattemptid] = array();
+            }
+            $slot = $attempt->slot;
+            if (!isset($slotsfields[$slot])) {
+                $slotsfields[$slot] = array();
+            }
+            if (!isset($steps[$attempt->quizattemptid][$attempt->sequencenumber])) {
+                $steps[$attempt->quizattemptid][$attempt->sequencenumber] = array();
+                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['lastname'] = $attempt->lastname;
+                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['firstname'] = $attempt->firstname;
+            }
+            if ($attempt->variant != 1) {
+                if (!in_array('variants.'.$slot, $slotsfields[$slot])) {
+                    $slotsfields[$slot][] = 'variants.'.$slot;
+                }
+                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['variants.'.$slot] = $attempt->variant;
+            }
+            $subqname = $this->get_subqname_for_slot_from_id($slot, $attempt->questionid);
+            if ($subqname !== null) {
+                if (!in_array('randqs.'.$slot, $slotsfields[$slot])) {
+                    $slotsfields[$slot][] = 'randqs.'.$slot;
+                }
+                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['randqs.'.$slot] = $subqname;
+            }
             if ($attempt->name{0} != '_' && $attempt->name{1} != '_' && $attempt->name != '-finish') {
-                if (!isset($steps[$attempt->quizattemptid])) {
-                    $steps[$attempt->quizattemptid] = array();
-                }
-                $slot = $attempt->slot;
-                if (!isset($slotsfields[$slot])) {
-                    $slotsfields[$slot] = array();
-                }
-                if (!isset($steps[$attempt->quizattemptid][$attempt->sequencenumber])) {
-                    $steps[$attempt->quizattemptid][$attempt->sequencenumber] = array();
-                    $steps[$attempt->quizattemptid][$attempt->sequencenumber]['lastname'] = $attempt->lastname;
-                    $steps[$attempt->quizattemptid][$attempt->sequencenumber]['firstname'] = $attempt->firstname;
-
-                    if ($attempt->variant != 1) {
-                        if (!in_array('variants.'.$slot, $slotsfields[$slot])) {
-                            $slotsfields[$slot][] = 'variants.'.$slot;
-                        }
-                        $steps[$attempt->quizattemptid][$attempt->sequencenumber]['variants.'.$slot] = $attempt->variant;
-                    }
-                    $subqname = $this->get_subqname_for_slot_from_id($slot, $attempt->questionid);
-                    if ($subqname !== null) {
-                        if (!in_array('randqs.'.$slot, $slotsfields[$slot])) {
-                            $slotsfields[$slot][] = 'randqs.'.$slot;
-                        }
-                        $steps[$attempt->quizattemptid][$attempt->sequencenumber]['randqs.'.$slot] = $subqname;
-                    }
-                }
                 $csvcolumn = 'responses.'.$slot.'.'.$attempt->name;
 
                 if (!in_array($csvcolumn, $slotsfields[$slot])) {
@@ -495,22 +494,18 @@ EOF;
         }
         $export->add_data($fields);
 
-        $attemptnumber = 1;
+        $attemptnumber = 1; // CSV column unique, in CSV file, for each student attempt.
         foreach ($steps as $attemptsteps) {
             $row = array();
             do {
-                $attemptstep = array_shift($attemptsteps);
+                list($sequencenumber, $attemptstep) = each($attemptsteps);
                 foreach ($fields as $field) {
                     if (!isset($attemptstep[$field])) {
                         if ($field === 'finished') {
-                            if (count($attemptsteps) > 0) {
-                                $row['finished'] = 0;
-                            } else {
-                                $row['finished'] = 1;
-                            }
+                            $row['finished'] = (int)(current($attemptsteps) === FALSE);
                         } else if ($field === 'quizattempt') {
                             $row['quizattempt'] = $attemptnumber;
-                        } else if (substr($field, 0, 9) === 'variants.') {
+                        } else if (!isset($row[$field]) && substr($field, 0, 9) === 'variants.') {
                             $row[$field] = 1;
                         } else if (substr($field, -9) == '-tryagain' || substr($field, -7) == '-submit') {
                             $row[$field] = 0;
@@ -521,8 +516,10 @@ EOF;
                         $row[$field] = $attemptstep[$field];
                     }
                 }
-                $export->add_data($row);
-            } while ($attemptsteps);
+                if ($sequencenumber != 0) {
+                    $export->add_data($row);
+                }
+            } while (current($attemptsteps) !== FALSE);
             $attemptnumber++;
         }
         $export->download_file();
