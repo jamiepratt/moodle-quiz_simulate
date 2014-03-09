@@ -44,8 +44,11 @@ class quiz_simulate_report extends quiz_default_report {
     /** @var object the quiz context. */
     protected $context;
 
-    /** @var object the quiz record. */
+    /** @var object quiz record for this quiz. */
     protected $quiz;
+
+    /** @var quiz instance of quiz for this quiz. */
+    protected $quizobj;
 
     /** @var object the course record. */
     protected $course;
@@ -56,12 +59,13 @@ class quiz_simulate_report extends quiz_default_report {
     protected $subqs = null;
 
     /**
-     * @var int[]
+     * Index is slot number. Value is full question object.
+     * @var object[]
      */
-    protected $qids = null;
+    protected $questions = null;
 
     public function display($quiz, $cm, $course) {
-        global $OUTPUT, $DB;
+        global $OUTPUT;
         $this->context = context_module::instance($cm->id);
         $this->quiz = $quiz;
         $this->course = $course;
@@ -301,23 +305,27 @@ class quiz_simulate_report extends quiz_default_report {
      */
     protected function start_attempt($step, $userid) {
         // Start the attempt.
-        $quizobj = quiz::create($this->quiz->id, $userid);
-        $quba = question_engine::make_questions_usage_by_activity('mod_quiz', $quizobj->get_context());
-        $quba->set_preferred_behaviour($quizobj->get_quiz()->preferredbehaviour);
+        $this->quizobj = quiz::create($this->quiz->id, $userid);
+        $quba = question_engine::make_questions_usage_by_activity('mod_quiz', $this->quizobj->get_context());
+        $quba->set_preferred_behaviour($this->quiz->preferredbehaviour);
 
         $prevattempts = quiz_get_user_attempts($this->quiz->id, $userid, 'all', true);
 
         $attemptnumber = count($prevattempts) + 1;
-        $attempt = quiz_create_attempt($quizobj, $attemptnumber, false, time(), false, $userid);
+        $attempt = quiz_create_attempt($this->quizobj, $attemptnumber, false, time(), false, $userid);
         // Select variant and / or random sub question.
         if (!isset($step['variants'])) {
             $step['variants'] = array();
         }
 
+        // Pre-load the questions so that we can find the ids of random questions.
+        $this->quizobj->preload_questions();
+        $this->quizobj->load_questions();
+
         $randqids = $this->find_randq_ids_from_step_data($step);
 
-        quiz_start_new_attempt($quizobj, $quba, $attempt, $attemptnumber, time(), $randqids, $step['variants']);
-        quiz_attempt_save_started($quizobj, $quba, $attempt);
+        quiz_start_new_attempt($this->quizobj, $quba, $attempt, $attemptnumber, time(), $randqids, $step['variants']);
+        quiz_attempt_save_started($this->quizobj, $quba, $attempt);
         return $attempt->id;
     }
 
@@ -346,21 +354,20 @@ class quiz_simulate_report extends quiz_default_report {
             return;
         }
         $this->subqs = array();
-        $qids = explode(',', quiz_questions_in_quiz($this->quiz->questions));
-        question_finder::get_instance()->load_many_for_cache(array_combine($qids, $qids));
+        $questions = $this->quizobj->get_questions();
 
-        $this->qids = array_combine(range(1, count($qids)), $qids);
-        foreach ($this->qids as $slot => $qid) {
-            $q = question_finder::get_instance()->load_question_data($qid);
+        foreach ($questions as $q) {
+            $this->questions[$q->slot] = $q;
+        }
+        foreach ($this->questions as $slot => $q) {
             if ($q->qtype === 'random') {
-                $subqids = question_bank::get_qtype('random')
-                    ->get_available_questions_from_category($q->category, !empty($q->questiontext));
+                $randqtypeobj = question_bank::get_qtype('random');
+                $subqids = $randqtypeobj->get_available_questions_from_category($q->category, !empty($q->questiontext));
                 $this->subqs[$slot] = array();
                 foreach ($subqids as $subqid) {
                     $subq = question_finder::get_instance()->load_question_data($subqid);
                     $this->subqs[$slot][$subq->id] = $subq->name;
                 }
-
             }
         }
     }
@@ -387,7 +394,7 @@ class quiz_simulate_report extends quiz_default_report {
      */
     protected function get_subqname_for_slot_from_id($slot, $qid) {
         $this->get_subq_names();
-        if ($qid == $this->qids[$slot]) {
+        if ($this->questions[$slot]->qtype !== 'random') {
             return null;
         } else {
             $subqnames = $this->get_subq_names_for_slot($slot);
@@ -418,7 +425,7 @@ class quiz_simulate_report extends quiz_default_report {
      * Prepare csv file describing student attempts and send it as download.
      */
     protected function send_download() {
-        global $DB;
+        global $DB, $USER;
         $sql = <<<EOF
  SELECT
     qasd.id AS id,
@@ -444,6 +451,12 @@ WHERE quiza.quiz = {$this->quiz->id} AND u.id = quiza.userid
 ORDER BY quiza.userid, quiza.attempt, qa.slot, qas.sequencenumber, qasd.name
 
 EOF;
+
+        // Load questions so that we can find randqids.
+        $this->quizobj = quiz::create($this->quiz->id, $USER->id);
+        $this->quizobj->preload_questions();
+        $this->quizobj->load_questions();
+
         $attempts = $DB->get_records_sql($sql);
         $steps = array();
         $fields = array('quizattempt', 'firstname', 'lastname', 'finished');
@@ -502,7 +515,7 @@ EOF;
                 foreach ($fields as $field) {
                     if (!isset($attemptstep[$field])) {
                         if ($field === 'finished') {
-                            $row['finished'] = (int)(current($attemptsteps) === FALSE);
+                            $row['finished'] = (int)(current($attemptsteps) === false);
                         } else if ($field === 'quizattempt') {
                             $row['quizattempt'] = $attemptnumber;
                         } else if (!isset($row[$field]) && substr($field, 0, 9) === 'variants.') {
@@ -519,7 +532,7 @@ EOF;
                 if ($sequencenumber != 0) {
                     $export->add_data($row);
                 }
-            } while (current($attemptsteps) !== FALSE);
+            } while (current($attemptsteps) !== false);
             $attemptnumber++;
         }
         $export->download_file();
