@@ -29,6 +29,7 @@ require_once($CFG->libdir . '/csvlib.class.php');
 require_once($CFG->dirroot .'/mod/quiz/report/simulate/simulate_form.php');
 require_once($CFG->dirroot . '/mod/quiz/editlib.php');
 require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+require_once($CFG->dirroot . '/mod/quiz/report/statistics/statisticslib.php');
 
 /**
  * Report subclass used for the uploading of response data.
@@ -188,7 +189,7 @@ class quiz_simulate_report extends quiz_default_report {
                 echo $OUTPUT->continue_button($reporturl->out(false, array('mode' => 'overview')));
             }
         } else if (optional_param('download', 0, PARAM_BOOL)) {
-            $this->send_download();
+            $this->download();
 
         } else {
             $this->print_header_and_tabs($cm, $course, $quiz, $this->mode);
@@ -424,118 +425,218 @@ class quiz_simulate_report extends quiz_default_report {
     /**
      * Prepare csv file describing student attempts and send it as download.
      */
-    protected function send_download() {
-        global $DB, $USER;
-        $sql = <<<EOF
- SELECT
-    qasd.id AS id,
-    quiza.id AS quizattemptid,
-    u.lastname,
-    u.firstname,
-    qa.variant,
-    qa.slot,
-    qa.questionid,
-    qas.sequencenumber,
-    qasd.name,
-    qasd.VALUE
+    protected function download() {
+        list($fieldnamesforslots, $userids, $attemptdata, $questionnames, $variants, $finish) = $this->get_data_for_download();
+        list($headers, $rows) = $this->get_csv_file_data($fieldnamesforslots,
+                                                         $userids,
+                                                         $attemptdata,
+                                                         $questionnames,
+                                                         $variants,
+                                                         $finish);
+        $this->send_csv_file($headers, $rows);
+    }
 
-FROM mdl_user u,
-mdl_quiz_attempts quiza
-JOIN mdl_question_usages qu ON qu.id = quiza.uniqueid
-JOIN mdl_question_attempts qa ON qa.questionusageid = qu.id
-JOIN mdl_question_attempt_steps qas ON qas.questionattemptid = qa.id
-LEFT JOIN mdl_question_attempt_step_data qasd ON qasd.attemptstepid = qas.id
-
-WHERE quiza.quiz = {$this->quiz->id} AND u.id = quiza.userid
-
-ORDER BY quiza.userid, quiza.attempt, qa.slot, qas.sequencenumber, qasd.name
-
-EOF;
-
-        // Load questions so that we can find randqids.
-        $this->quizobj = quiz::create($this->quiz->id, $USER->id);
-        $this->quizobj->preload_questions();
-        $this->quizobj->load_questions();
-
-        $attempts = $DB->get_records_sql($sql);
-        $steps = array();
-        $fields = array('quizattempt', 'firstname', 'lastname', 'finished');
-        $slotsfields = array();
-        foreach ($attempts as $attempt) {
-            if (!isset($steps[$attempt->quizattemptid])) {
-                $steps[$attempt->quizattemptid] = array();
-            }
-            $slot = $attempt->slot;
-            if (!isset($slotsfields[$slot])) {
-                $slotsfields[$slot] = array();
-            }
-            if (!isset($steps[$attempt->quizattemptid][$attempt->sequencenumber])) {
-                $steps[$attempt->quizattemptid][$attempt->sequencenumber] = array();
-                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['lastname'] = $attempt->lastname;
-                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['firstname'] = $attempt->firstname;
-            }
-            if ($attempt->variant != 1) {
-                if (!in_array('variants.'.$slot, $slotsfields[$slot])) {
-                    $slotsfields[$slot][] = 'variants.'.$slot;
+    /**
+     * @return array params for get_csv_file_data see that method's description.
+     */
+    protected function get_data_for_download() {
+        $qubaids = quiz_statistics_qubaids_condition($this->quiz->id, array());
+        $dm = new question_engine_data_mapper();
+        $qubas = $dm->load_questions_usages_by_activity($qubaids);
+        $quizattempt = 1;
+        $fieldnamesforslots = array();
+        $attemptdata = array();
+        $finish = array();
+        $questionnames = array();
+        $variants = array();
+        $userids = array();
+        foreach ($qubas as $quba) {
+            $attemptdata[$quizattempt] = array();
+            $quizattemptobj = quiz_attempt::create_from_usage_id($quba->get_id());
+            $userids[$quizattempt] = $quizattemptobj->get_userid();
+            $slots = $quba->get_slots();
+            foreach ($slots as $slot) {
+                if (!isset($questionnames[$slot])) {
+                    $questionnames[$slot] = array();
                 }
-                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['variants.'.$slot] = $attempt->variant;
-            }
-            $subqname = $this->get_subqname_for_slot_from_id($slot, $attempt->questionid);
-            if ($subqname !== null) {
-                if (!in_array('randqs.'.$slot, $slotsfields[$slot])) {
-                    $slotsfields[$slot][] = 'randqs.'.$slot;
+                if (!isset($variants[$slot])) {
+                    $variants[$slot] = array();
                 }
-                $steps[$attempt->quizattemptid][$attempt->sequencenumber]['randqs.'.$slot] = $subqname;
+                if (!isset($fieldnamesforslots[$slot])) {
+                    $fieldnamesforslots[$slot] = array();
+                }
+                $question = $quba->get_question($slot);
+                $questionnames[$slot][$quizattempt] = $question->name;
+                $variants[$slot][$quizattempt] = $quba->get_variant($slot);
+                $steps = $quba->get_question_attempt($slot)->get_full_step_iterator();
+                foreach ($steps as $stepno => $step) {
+                    $dataforthisslotandstep = $this->get_csv_step_data($question, $step);
+                    if (!count($dataforthisslotandstep)) {
+                        continue;
+                    }
+                    if (!isset($attemptdata[$quizattempt][$stepno])) {
+                        $attemptdata[$quizattempt][$stepno] = array();
+                    }
+                    $attemptdata[$quizattempt][$stepno][$slot] = $dataforthisslotandstep;
+                    $thisstepslotfieldnames = array_keys($dataforthisslotandstep);
+                    $fieldnamesforslots[$slot] = array_unique(array_merge($fieldnamesforslots[$slot], $thisstepslotfieldnames));
+                }
             }
-            if ($attempt->name{0} != '_' && $attempt->name{1} != '_' && $attempt->name != '-finish') {
-                $csvcolumn = 'responses.'.$slot.'.'.$attempt->name;
+            $firstslot = reset($slots);
+            // Use last step of first slot to see if this attempt was finished.
+            $finish[$quizattempt] = $quba->get_question_attempt($firstslot)->get_last_step()->get_state()->is_finished();
+            $quizattempt++;
+        }
+        return array($fieldnamesforslots, $userids, $attemptdata, $questionnames, $variants, $finish);
+    }
 
-                if (!in_array($csvcolumn, $slotsfields[$slot])) {
-                    $slotsfields[$slot][] = $csvcolumn;
-                }
-                $steps[$attempt->quizattemptid][$attempt->sequencenumber][$csvcolumn] = $attempt->value;
+    /**
+     * Gets the data for one step for one question.
+     *
+     * @param question_definition $question The question.
+     * @param question_attempt_step $step   The step to get the data from.
+     * @return string[] the csv data for this step.
+     */
+    protected function get_csv_step_data($question, $step) {
+        $csvdata = array();
+        $allqtdata = $question->get_student_response_values_for_simulation($step->get_qt_data());
+        foreach ($allqtdata as $qtname => $qtvalue) {
+            if ($qtname[0] != '_') {
+                $csvdata[$qtname] = $qtvalue;
             }
         }
-
-        $export = new csv_export_writer();
-
-        $export->set_filename(clean_filename($this->quiz->name.'_stepdata'));
-
-        foreach ($slotsfields as $slotfields) {
-            sort($slotfields);
-            $fields = array_merge($fields, $slotfields);
+        $behaviourdata = $step->get_behaviour_data();
+        foreach ($behaviourdata as $behaviourvarname => $behaviourvarvalue) {
+            if ($behaviourvarname[0] != '_' && $behaviourvarname != 'finish') {
+                $csvdata['-'.$behaviourvarname] = $behaviourvarvalue;
+            }
         }
-        $export->add_data($fields);
+        return $csvdata;
+    }
 
-        $attemptnumber = 1; // CSV column unique, in CSV file, for each student attempt.
-        foreach ($steps as $attemptsteps) {
-            $row = array();
-            do {
-                list($sequencenumber, $attemptstep) = each($attemptsteps);
-                foreach ($fields as $field) {
-                    if (!isset($attemptstep[$field])) {
-                        if ($field === 'finished') {
-                            $row['finished'] = (int)(current($attemptsteps) === false);
-                        } else if ($field === 'quizattempt') {
-                            $row['quizattempt'] = $attemptnumber;
-                        } else if (!isset($row[$field]) && substr($field, 0, 9) === 'variants.') {
-                            $row[$field] = 1;
-                        } else if (substr($field, -9) == '-tryagain' || substr($field, -7) == '-submit') {
-                            $row[$field] = 0;
-                        } else if (!isset($row[$field])) {
-                            $row[$field] = '';
+    /**
+     * @param array[] $fieldnamesforslots The field names per slot of data to download.
+     * @param int[]   $userids            The user id for the user for each quiz attempt.
+     * @param array[] $attemptdata        with step data first index is quiz attempt no and second is step no third index is
+     *                                    question type data or behaviour var name.
+     * @param array[] $questionnames      The question name for question indexed by slot no and then quiz attempt.
+     * @param array[] $variants           The variant no for question indexed by slot no and then quiz attempt.
+     * @param bool[]  $finish             Is question attempt finished - indexed by quiz attempt no.
+     * @return array[] with two values array $headers for file and array $rows for file
+     */
+    protected function get_csv_file_data($fieldnamesforslots, $userids, $attemptdata, $questionnames, $variants, $finish) {
+        global $DB;
+        $headers = array('quizattempt', 'firstname', 'lastname');
+        $rows = array();
+        $subqcolumns = array();
+        $variantnocolumns = array();
+        foreach (array_keys($fieldnamesforslots) as $slot) {
+            sort($fieldnamesforslots[$slot]);
+            $subqcolumns[$slot] = count(array_unique($questionnames[$slot])) > 1;
+            if ($subqcolumns[$slot]) {
+                $headers[] = 'randqs.'.$slot;
+            }
+            $variantnocolumns[$slot] = false;
+            foreach ($variants[$slot] as $variant) {
+                if ($variant != 1) {
+                    $variantnocolumns[$slot] = true;
+                    break;
+                }
+            }
+            if ($variantnocolumns[$slot]) {
+                $headers[] = 'variants.'.$slot;
+            }
+            foreach ($fieldnamesforslots[$slot] as $fieldname) {
+                $headers[] = 'responses.'.$slot.'.'.$fieldname;
+            }
+        }
+        $users = $DB->get_records_list('user', 'id', array_unique($userids), '', 'id, firstname, lastname');
+        // Any zero elements in finish array?
+        $finishcolumn = false;
+        foreach ($attemptdata as $quizattempt => $stepsslotscsvdata) {
+            if (count($stepsslotscsvdata) > 1) {
+                // More than one step in this quiz attempt.
+                $finishcolumn = true;
+                break;
+            }
+        }
+        if ($finishcolumn) {
+            $headers[] = 'finished';
+        }
+        foreach ($attemptdata as $quizattempt => $stepsslotscsvdata) {
+            $firstrow = true;
+            $stepnos = array_keys($stepsslotscsvdata);
+            $laststepno = array_pop($stepnos);
+            foreach ($stepsslotscsvdata as $stepno => $slotscsvdata) {
+                $row = array();
+                $row[] = $quizattempt;
+                if ($firstrow) {
+                    $row[] = $users[$userids[$quizattempt]]->firstname;
+                    $row[] = $users[$userids[$quizattempt]]->lastname;
+                } else {
+                    $row[] = '';
+                    $row[] = '';
+                }
+                foreach ($fieldnamesforslots as $slot => $fieldnames) {
+                    if ($subqcolumns[$slot]) {
+                        if ($firstrow) {
+                            $row[] = $questionnames[$slot][$quizattempt];
+                        } else {
+                            $row[] = '';
                         }
-                    } else {
-                        $row[$field] = $attemptstep[$field];
+                    }
+                    if ($variantnocolumns[$slot]) {
+                        if ($firstrow) {
+                            $row[] = $variants[$slot][$quizattempt];
+                        } else {
+                            $row[] = '';
+                        }
+                    }
+                    foreach ($fieldnames as $fieldname) {
+                        $value = '';
+                        $stepnocountback = $stepno;
+                        if ($fieldname{0} == '-') {
+                            // Behaviour data.
+                            if (isset($slotscsvdata[$slot][$fieldname])) {
+                                $value = $slotscsvdata[$slot][$fieldname];
+                            } else {
+                                $value = '';
+                            }
+                        } else {
+                            // Question type data, repeat last value if there is no value in this step.
+                            while ($stepnocountback > 0) {
+                                if (isset($stepsslotscsvdata[$stepnocountback][$slot][$fieldname]) &&
+                                                $stepsslotscsvdata[$stepnocountback][$slot][$fieldname] !== '') {
+                                    $value = $stepsslotscsvdata[$stepnocountback][$slot][$fieldname];
+                                    break;
+                                }
+                                $stepnocountback--;
+                            }
+                        }
+                        $row[] = $value;
                     }
                 }
-                if ($sequencenumber != 0) {
-                    $export->add_data($row);
+                if ($finishcolumn) {
+                    if ($stepno == $laststepno) {
+                        $row[] = $finish[$quizattempt] ? '1' : '0';
+                    } else {
+                        $row[] = '0';
+                    }
                 }
-            } while (current($attemptsteps) !== false);
-            $attemptnumber++;
+                $rows[] = $row;
+                $firstrow = false;
+            }
+        }
+        return array($headers, $rows);
+    }
+
+    protected function send_csv_file($headers, $rows) {
+        $export = new csv_export_writer();
+        $export->set_filename(clean_filename($this->quiz->name.'_stepdata'));
+        $export->add_data($headers);
+        foreach ($rows as $row) {
+            $export->add_data($row);
         }
         $export->download_file();
     }
-
 }

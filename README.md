@@ -1,13 +1,17 @@
 A Moodle Quiz Report Plug in For Simulating Student Quiz Attempts
 =================================================================
 
-This plug in was developed to aid testing of the quiz statistics. It allows you to upload a csv file with information about
-student attempts, the users are then created and enrolled in the course if necessary and then Moodle evaluates there responses to
-the quiz questions and grades and stats are calculated as they would be for real student attempts.
+This plug in was developed to aid testing of the quiz.
+
+You can use it to download / upload csv file describing student attempts.
+
+If you upload a csv file for users that don't already exist, users are then created, and enrolled in the course
+if necessary and then Moodle evaluates their responses to the quiz questions. It is just as if these students had attempted the
+quiz.
 
 ##Compatibility
 
-Works with Moodle 2.6+
+Works with Moodle 2.7
 
 ##Installation
 
@@ -31,7 +35,21 @@ plug-in.
 
 ##Usage
 
-See the example quiz back-ups (.mbz) and response data (.csv) files in the mod/quiz/report/simulate/examples/ directory.
+###Download
+
+Use the download button to download a csv file representing the interaction of students, as well as what variant and what subq
+the student saw.
+
+###Upload
+
+- Use the check box to delete all previous attempts before simulating the new attempts.
+- The check box to shuffle responses takes the students interactions with each question variant and subq from the csv file but
+then creates randomised simulated attempts by randomly selecting from these interaction histories for each attempt. It creates 40
+ times the number of attempts in the original csv file.
+
+####Examples in examples/ directory
+
+See the example quiz back-ups (.mbz) and response data (.csv) files in the simulate/examples/ directory.
 
 For the examples in each sub directory :
 
@@ -40,7 +58,14 @@ administration menu.
 2. and the response data file can be used to simulate responses by students to the quiz. Once you have created the quiz go to
 'Reasults -> Simulate' in the Quiz you created's Quiz Administration menu.
 
-###Format of Response Data CSV file
+####stepsXX.csv files used for unit tests
+
+In directories mod/quiz/report/statistics/tests/fixtures/ and mod/quiz/report/responses/tests/fixtures/ you will find stepsXX.csv
+files. They use the same format as produced by this report. mod/quiz/report/statistics/tests/stats_from_steps_walkthrough_test.php
+and mod/quiz/report/responses/tests/responses_from_steps_walkthrough_test.php are unit tests that read these csv files and
+simulate student attempts at a quiz in order to then check that stats and response counts are then as expected.
+
+####Format of Response Data CSV file
 
 The format of the files is pretty self explanatory, field column names are as follows :
 following :
@@ -57,7 +82,7 @@ student is not enrolled they are enrolled.
 - responses.{slot no}.{response field name} This column is used to specify what the student entered in the question. For some
 question types there would be several response field names per slot.
 - responses.{slot no}.{-behaviour var name} You can also specify behaviour vars in the responses such as -tryagain or -submit
- - finished - this column specifies whether the attempt should be finished after the responses have been processed. If the
+- finished - this column specifies whether the attempt should be finished after the responses have been processed. If the
  column is omitted then the default is to finish each attempt in each row.
 
 
