@@ -34,7 +34,7 @@ function xmldb_quiz_simulate_install() {
 
     $record = new stdClass();
     $record->name         = 'simulate';
-    $record->displayorder = 10000;
+    $record->displayorder = 1;
     $record->cron         = 0;
     $record->capability   = 'mod/quiz:grade';
 
